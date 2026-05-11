@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import streamlit as st
 from io import BytesIO
+from pathlib import Path
 
 st.set_page_config(page_title="LC Transfer Analog Simulator", layout="wide")
 
@@ -365,15 +366,15 @@ def sync_query_params(settings):
 # -----------------------------
 st.title("LC Transfer Analog Simulator")
 st.caption(
-    "Interactive classical LC analogs of donor excitation, direct transfer, off-resonant bus-mediated "
-    "transfer, collective bright-mode enhancement, and resonant-bus transfer."
+    "Interactive classical LC analogs of direct transfer, resonant bus-mediated transfer, "
+    "off-resonant bus-mediated transfer, and collective bright-mode enhancement."
 )
 
 scenario_options = [
-    "1. Excite donor only",
-    "2. Direct donor → acceptor transfer",
-    "3. Donor → acceptor via off-resonant bus (single or collective)",
-    "4. Donor → acceptor via resonant/near-resonant bus",
+    "a) Direct coupling",
+    "b) Indirect coupling via resonant bus",
+    "c) Indirect coupling via off-resonant bus",
+    "d) Indirect coupling via off-resonant bus with collective enhancement",
 ]
 
 scenario_default = query_choice("scenario", scenario_options, scenario_options[0])
@@ -485,31 +486,12 @@ drive_envelope, drive_carrier_unit = make_drive(t, omega_ref, duration)
 kappa_D = omegaD / Q_D
 kappa_A = omegaA / Q_A
 
-if scenario == "1. Excite donor only":
-    st.markdown("### Scenario 1: donor excitation only")
+scenario_warning = None
+scenario_notes = []
+N_D = 1
+N_A = 1
 
-    st.write(
-        "The drive prepares the donor LC excitation. The stored donor energy is the closest "
-        "classical analog of a quantum-state occupation probability."
-    )
-
-    omegas = [omegaD]
-    kappas = [kappa_D]
-    G = [[0.0]]
-    drive_vector = [drive_strength]
-
-    amplitude_meta = [
-        {"label": "Donor amplitude", "indices": [0], "color_key": "donor"},
-    ]
-    energy_meta = [
-        {"label": "Stored donor energy", "indices": [0], "color_key": "donor"},
-    ]
-
-    drive_signal_for_plot = drive_strength * drive_carrier_unit
-
-    title = f"Donor-only excitation after {N_cycles}-cycle {fD_khz:.0f} kHz burst"
-
-elif scenario == "2. Direct donor → acceptor transfer":
+if scenario == "a) Direct coupling":
     # Direct coupling in kHz. For backward compatibility, old URLs using
     # J_hz are still read and converted if J_khz is not present.
     J_khz_default = query_float("J_hz", 3000.0, 0.0, 20000.0) / 1000.0
@@ -525,18 +507,17 @@ elif scenario == "2. Direct donor → acceptor transfer":
 
     J = khz_to_omega(J_khz)
 
-    st.markdown("### Scenario 2: direct donor–acceptor transfer")
-
-    st.latex(r"J_a = g_{DA}(x)")
-
-    st.write("In the weak/lossy transfer-rate limit,")
-
-    st.latex(r"\Gamma_a \sim \frac{|g_{DA}(x)|^2}{\kappa}")
-
-    st.write(
-        "This simulation keeps the coherent dynamics explicitly, so visible energy sloshing "
-        "appears when the coupling is strong enough."
-    )
+    scenario_notes = [
+        ("markdown", "### a) Direct coupling"),
+        ("latex", r"J_a = g_{DA}(x)"),
+        ("markdown", "In the weak/lossy transfer-rate limit,"),
+        ("latex", r"\Gamma_a \sim \frac{|g_{DA}(x)|^2}{\kappa}"),
+        (
+            "markdown",
+            "This simulation keeps the coherent dynamics explicitly, so visible energy sloshing "
+            "appears when the coupling is strong enough.",
+        ),
+    ]
 
     omegas = [omegaD, omegaA]
     kappas = [kappa_D, kappa_A]
@@ -562,29 +543,33 @@ elif scenario == "2. Direct donor → acceptor transfer":
         f"J_a/2π = {J_khz:.1f} kHz"
     )
 
-elif scenario == "3. Donor → acceptor via off-resonant bus (single or collective)":
-    st.markdown("### Scenario 3: donor–acceptor transfer through an off-resonant bus")
-
-    st.write(
-        "This combines the single-donor/single-acceptor off-resonant bus case and the "
-        "collective-enhancement off-resonant bus case into one generalized scenario."
-    )
-
-    st.markdown(
-        """
-        - If **N_D = N_A = 1**, this reduces to the ordinary single-donor/single-acceptor bus case.
-        - If either **N_D > 1** or **N_A > 1**, the simulation represents the corresponding
-          donor and acceptor **bright modes** coupled through the bus.
-        """
-    )
-
-    st.write("In the large-detuning limit,")
-
-    st.latex(r"""
-    J_{\rm single} \simeq \frac{g_D g_A}{\Delta_B},
-    \qquad
-    J_{\rm bright} \simeq \sqrt{N_D N_A}\frac{g_D g_A}{\Delta_B}.
-    """)
+elif scenario in (
+    "c) Indirect coupling via off-resonant bus",
+    "d) Indirect coupling via off-resonant bus with collective enhancement",
+):
+    collective_mode = scenario.startswith("d)")
+    if collective_mode:
+        scenario_notes = [
+            ("markdown", "### d) Indirect coupling via off-resonant bus with collective enhancement"),
+            (
+                "markdown",
+                "The simulation represents donor and acceptor bright modes coupled through an "
+                "off-resonant bus.",
+            ),
+            (
+                "latex",
+                r"J_d \simeq \sqrt{N_D N_A}\frac{g_D g_A}{\Delta_B}",
+            ),
+        ]
+    else:
+        scenario_notes = [
+            ("markdown", "### c) Indirect coupling via off-resonant bus"),
+            (
+                "markdown",
+                "This is the single-donor/single-acceptor off-resonant bus case.",
+            ),
+            ("latex", r"J_c \simeq \frac{g_D g_A}{\Delta_B}"),
+        ]
 
     fB_khz = st.sidebar.slider(
         "Bus frequency f_B (kHz)",
@@ -602,22 +587,26 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         10,
         key="Q_B",
     )
-    N_D = st.sidebar.slider(
-        "Number of coherent donors N_D",
-        1,
-        20,
-        query_int("N_D", 1, 1, 20),
-        1,
-        key="N_D",
-    )
-    N_A = st.sidebar.slider(
-        "Number of coherent acceptors N_A",
-        1,
-        20,
-        query_int("N_A", 1, 1, 20),
-        1,
-        key="N_A",
-    )
+    if collective_mode:
+        N_D = st.sidebar.slider(
+            "Number of coherent donors N_D",
+            1,
+            20,
+            query_int("N_D", 2, 1, 20),
+            1,
+            key="N_D",
+        )
+        N_A = st.sidebar.slider(
+            "Number of coherent acceptors N_A",
+            1,
+            20,
+            query_int("N_A", 2, 1, 20),
+            1,
+            key="N_A",
+        )
+    else:
+        N_D = 1
+        N_A = 1
     g_D_khz = st.sidebar.slider(
         "Single-donor g_D / 2π (kHz)",
         0.0,
@@ -639,12 +628,12 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         {
             "fB_khz": fB_khz,
             "Q_B": Q_B,
-            "N_D": N_D,
-            "N_A": N_A,
             "g_D_khz": g_D_khz,
             "g_A_khz": g_A_khz,
         }
     )
+    if collective_mode:
+        settings_to_sync.update({"N_D": N_D, "N_A": N_A})
 
     omegaB = khz_to_omega(fB_khz)
     kappa_B = omegaB / Q_B
@@ -704,38 +693,25 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
     )
 
     title = (
-        f"Off-resonant bus-mediated donor-acceptor transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
+        f"Off-resonant bus-mediated transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
         f"N_D = {N_D}, N_A = {N_A}, f_B = {fB_khz:.0f} kHz, {coupling_text}"
     )
 
     if abs(Delta_B / (2 * np.pi)) < 5e3:
-        st.warning("The bus is close to resonance. The large-detuning estimate for J is not reliable here.")
+        scenario_warning = "The bus is close to resonance. The large-detuning estimate for J is not reliable here."
 
 
-else:
-    st.markdown("### Scenario 4: donor–acceptor transfer through a resonant or near-resonant bus")
-
-    st.write(
-        "This case keeps the bus as an explicit dynamical resonator that is on or near resonance "
-        "with the donor and/or acceptor. Unlike the off-resonant case, the bus can become "
-        "substantially populated, so the simple virtual-bus estimate is not the right picture."
-    )
-
-    st.write("The relevant coherent couplings are")
-
-    st.latex(r"""
-    D \leftrightarrow B \leftrightarrow A,
-    \qquad
-    g_{DB},\; g_{BA},
-    """)
-
-    st.write("with detunings")
-
-    st.latex(r"""
-    \Delta_{DB} = \omega_D-\omega_B,
-    \qquad
-    \Delta_{AB} = \omega_A-\omega_B.
-    """)
+elif scenario == "b) Indirect coupling via resonant bus":
+    scenario_notes = [
+        ("markdown", "### b) Indirect coupling via resonant bus"),
+        (
+            "markdown",
+            "This case keeps the bus as an explicit dynamical resonator that is on or near resonance "
+            "with the donor and acceptor.",
+        ),
+        ("latex", r"D \leftrightarrow B \leftrightarrow A,\qquad g_{DB},\; g_{BA}"),
+        ("latex", r"J_b = \frac{1}{2}\sqrt{g_D^2 + g_A^2}"),
+    ]
 
     fB_khz = st.sidebar.slider(
         "Bus frequency f_B (kHz)",
@@ -877,6 +853,14 @@ a = rk4_coupled_modes(
     omega_ref=omega_ref,
 )
 
+scenario_image_paths = {
+    "a) Direct coupling": Path("assets/scenario_a.png"),
+    "b) Indirect coupling via resonant bus": Path("assets/scenario_b.png"),
+    "c) Indirect coupling via off-resonant bus": Path("assets/scenario_c.png"),
+    "d) Indirect coupling via off-resonant bus with collective enhancement": Path("assets/scenario_d.png"),
+}
+st.image(str(scenario_image_paths[scenario]), width=plot_width_px)
+
 fig = build_plot(
     t=t,
     a=a,
@@ -902,6 +886,15 @@ fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
 buf.seek(0)
 st.image(buf, width=plot_width_px)
 plt.close(fig)
+
+if scenario_warning:
+    st.warning(scenario_warning)
+
+for note_type, note_body in scenario_notes:
+    if note_type == "latex":
+        st.latex(note_body)
+    else:
+        st.markdown(note_body)
 
 # Keep the URL synchronized with the current UI state.
 sync_query_params(settings_to_sync)
