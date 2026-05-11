@@ -305,7 +305,7 @@ def _clamp(value, min_value, max_value):
     return max(min_value, min(max_value, value))
 
 def query_float(name, default, min_value=None, max_value=None):
-    raw = _query_value(name)
+    raw = st.session_state.get(name, _query_value(name))
     try:
         value = float(raw) if raw is not None else float(default)
     except (TypeError, ValueError):
@@ -318,7 +318,7 @@ def query_float(name, default, min_value=None, max_value=None):
     return value
 
 def query_int(name, default, min_value=None, max_value=None):
-    raw = _query_value(name)
+    raw = st.session_state.get(name, _query_value(name))
     try:
         value = int(round(float(raw))) if raw is not None else int(default)
     except (TypeError, ValueError):
@@ -331,11 +331,11 @@ def query_int(name, default, min_value=None, max_value=None):
     return value
 
 def query_choice(name, options, default):
-    raw = _query_value(name)
+    raw = st.session_state.get(name, _query_value(name))
     return raw if raw in options else default
 
 def query_float_option(name, options, default):
-    raw = _query_value(name)
+    raw = st.session_state.get(name, _query_value(name))
     try:
         value = float(raw) if raw is not None else float(default)
     except (TypeError, ValueError):
@@ -353,10 +353,12 @@ def sync_query_params(settings):
     Write the current UI settings into the URL query parameters.
     This makes copied/bookmarked URLs reproduce the same configuration.
     """
-    for key, value in settings.items():
-        formatted = format_query_value(value)
-        if _query_value(key) != formatted:
-            st.query_params[key] = formatted
+    formatted_settings = {key: format_query_value(value) for key, value in settings.items()}
+    if any(_query_value(key) != value for key, value in formatted_settings.items()):
+        try:
+            st.query_params.from_dict(formatted_settings)
+        except AttributeError:
+            st.query_params.update(formatted_settings)
 
 # -----------------------------
 # App UI
@@ -379,6 +381,7 @@ scenario = st.sidebar.selectbox(
     "Scenario",
     scenario_options,
     index=scenario_options.index(scenario_default),
+    key="scenario",
 )
 
 settings_to_sync = {"scenario": scenario}
@@ -390,6 +393,7 @@ fD_khz = st.sidebar.slider(
     300.0,
     query_float("fD_khz", 100.0, 20.0, 300.0),
     1.0,
+    key="fD_khz",
 )
 fA_khz = st.sidebar.slider(
     "Acceptor frequency f_A (kHz)",
@@ -397,6 +401,7 @@ fA_khz = st.sidebar.slider(
     300.0,
     query_float("fA_khz", 100.0, 20.0, 300.0),
     1.0,
+    key="fA_khz",
 )
 N_cycles = st.sidebar.slider(
     "Drive burst length (cycles)",
@@ -404,6 +409,7 @@ N_cycles = st.sidebar.slider(
     20,
     query_int("N_cycles", 5, 1, 20),
     1,
+    key="N_cycles",
 )
 Q_D = st.sidebar.slider(
     "Donor Q",
@@ -411,6 +417,7 @@ Q_D = st.sidebar.slider(
     1000,
     query_int("Q_D", 220, 10, 1000),
     10,
+    key="Q_D",
 )
 Q_A = st.sidebar.slider(
     "Acceptor Q",
@@ -418,6 +425,7 @@ Q_A = st.sidebar.slider(
     1000,
     query_int("Q_A", 220, 10, 1000),
     10,
+    key="Q_A",
 )
 drive_strength = st.sidebar.slider(
     "Drive strength (arb.)",
@@ -426,6 +434,7 @@ drive_strength = st.sidebar.slider(
     query_float("drive_strength", 1.2e5, 1e4, 5e5),
     1e4,
     format="%.0f",
+    key="drive_strength",
 )
 t_pre_us = st.sidebar.slider(
     "Time before burst (µs)",
@@ -433,6 +442,7 @@ t_pre_us = st.sidebar.slider(
     50.0,
     query_float("t_pre_us", 10.0, 0.0, 50.0),
     1.0,
+    key="t_pre_us",
 )
 t_post_us = st.sidebar.slider(
     "Time after burst (µs)",
@@ -440,12 +450,14 @@ t_post_us = st.sidebar.slider(
     3000.0,
     query_float("t_post_us", 850.0, 100.0, 3000.0),
     50.0,
+    key="t_post_us",
 )
 dt_options = [0.01, 0.02, 0.05, 0.1, 0.2]
 dt_us = st.sidebar.select_slider(
     "Time step (µs)",
     options=dt_options,
     value=query_float_option("dt_us", dt_options, 0.05),
+    key="dt_us",
 )
 
 settings_to_sync.update(
@@ -507,6 +519,7 @@ elif scenario == "2. Direct donor → acceptor transfer":
         20.0,
         query_float("J_khz", J_khz_default, 0.0, 20.0),
         0.1,
+        key="J_khz",
     )
     settings_to_sync["J_khz"] = J_khz
 
@@ -579,6 +592,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         300.0,
         query_float("fB_khz", 50.0, 5.0, 300.0),
         1.0,
+        key="fB_khz",
     )
     Q_B = st.sidebar.slider(
         "Bus Q",
@@ -586,6 +600,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         1000,
         query_int("Q_B", 160, 10, 1000),
         10,
+        key="Q_B",
     )
     N_D = st.sidebar.slider(
         "Number of coherent donors N_D",
@@ -593,6 +608,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         20,
         query_int("N_D", 1, 1, 20),
         1,
+        key="N_D",
     )
     N_A = st.sidebar.slider(
         "Number of coherent acceptors N_A",
@@ -600,6 +616,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         20,
         query_int("N_A", 1, 1, 20),
         1,
+        key="N_A",
     )
     g_D_khz = st.sidebar.slider(
         "Single-donor g_D / 2π (kHz)",
@@ -607,6 +624,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         40.0,
         query_float("g_D_khz", 8.0, 0.0, 40.0),
         0.5,
+        key="g_D_khz",
     )
     g_A_khz = st.sidebar.slider(
         "Single-acceptor g_A / 2π (kHz)",
@@ -614,6 +632,7 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
         40.0,
         query_float("g_A_khz", 8.0, 0.0, 40.0),
         0.5,
+        key="g_A_khz",
     )
 
     settings_to_sync.update(
@@ -724,6 +743,7 @@ else:
         300.0,
         query_float("fB_res_khz", fD_khz, 20.0, 300.0),
         1.0,
+        key="fB_res_khz",
     )
     Q_B = st.sidebar.slider(
         "Bus Q",
@@ -731,6 +751,7 @@ else:
         1000,
         query_int("Q_B_res", 220, 10, 1000),
         10,
+        key="Q_B_res",
     )
     g_DB_khz = st.sidebar.slider(
         "Donor-bus coupling g_DB / 2π (kHz)",
@@ -738,6 +759,7 @@ else:
         40.0,
         query_float("g_DB_res_khz", 3.0, 0.0, 40.0),
         0.1,
+        key="g_DB_res_khz",
     )
     g_BA_khz = st.sidebar.slider(
         "Bus-acceptor coupling g_BA / 2π (kHz)",
@@ -745,6 +767,7 @@ else:
         40.0,
         query_float("g_BA_res_khz", 3.0, 0.0, 40.0),
         0.1,
+        key="g_BA_res_khz",
     )
 
     settings_to_sync.update(
@@ -807,6 +830,7 @@ x_axis_max_us = st.sidebar.slider(
     max_value=total_time_max_us,
     value=query_float("x_axis_max_us", default_plot_max_us, min_plot_max_us, total_time_max_us),
     step=10.0,
+    key="x_axis_max_us",
 )
 plot_width_px = st.sidebar.slider(
     "Plot width (px)",
@@ -814,6 +838,7 @@ plot_width_px = st.sidebar.slider(
     2000,
     query_int("plot_width_px", 1100, 600, 2000),
     50,
+    key="plot_width_px",
 )
 plot_height_px = st.sidebar.slider(
     "Plot height (px)",
@@ -821,6 +846,7 @@ plot_height_px = st.sidebar.slider(
     1400,
     query_int("plot_height_px", 760, 400, 1400),
     20,
+    key="plot_height_px",
 )
 font_scale = st.sidebar.slider(
     "Plot font size scaling factor",
@@ -828,6 +854,7 @@ font_scale = st.sidebar.slider(
     2.5,
     query_float("font_scale", 1.0, 0.5, 2.5),
     0.05,
+    key="font_scale",
 )
 
 settings_to_sync.update(
