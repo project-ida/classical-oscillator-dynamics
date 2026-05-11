@@ -366,11 +366,12 @@ def sync_query_params(settings):
 # -----------------------------
 st.title("LC Transfer Analog Simulator")
 st.caption(
-    "Interactive classical LC analogs of direct transfer, resonant bus-mediated transfer, "
-    "off-resonant bus-mediated transfer, and collective bright-mode enhancement."
+    "Interactive classical LC analogs of donor preparation, direct transfer, resonant "
+    "bus-mediated transfer, off-resonant bus-mediated transfer, and collective bright-mode enhancement."
 )
 
 scenario_options = [
+    "Donor preparation",
     "a) Direct coupling",
     "b) Indirect coupling via resonant bus",
     "c) Indirect coupling via off-resonant bus",
@@ -491,7 +492,33 @@ scenario_notes = []
 N_D = 1
 N_A = 1
 
-if scenario == "a) Direct coupling":
+if scenario == "Donor preparation":
+    scenario_notes = [
+        ("markdown", "### Donor preparation"),
+        (
+            "markdown",
+            "The drive prepares the donor LC excitation. The stored donor energy is the closest "
+            "classical analog of a quantum-state occupation probability.",
+        ),
+    ]
+
+    omegas = [omegaD]
+    kappas = [kappa_D]
+    G = [[0.0]]
+    drive_vector = [drive_strength]
+
+    amplitude_meta = [
+        {"label": "Donor amplitude", "indices": [0], "color_key": "donor"},
+    ]
+    energy_meta = [
+        {"label": "Stored donor energy", "indices": [0], "color_key": "donor"},
+    ]
+
+    drive_signal_for_plot = drive_strength * drive_carrier_unit
+
+    title = f"Donor preparation after {N_cycles}-cycle {fD_khz:.0f} kHz burst"
+
+elif scenario == "a) Direct coupling":
     # Direct coupling in kHz. For backward compatibility, old URLs using
     # J_hz are still read and converted if J_khz is not present.
     J_khz_default = query_float("J_hz", 3000.0, 0.0, 20000.0) / 1000.0
@@ -854,12 +881,13 @@ a = rk4_coupled_modes(
 )
 
 scenario_image_paths = {
+    "Donor preparation": Path("assets/scenario_0.png"),
     "a) Direct coupling": Path("assets/scenario_a.png"),
     "b) Indirect coupling via resonant bus": Path("assets/scenario_b.png"),
     "c) Indirect coupling via off-resonant bus": Path("assets/scenario_c.png"),
     "d) Indirect coupling via off-resonant bus with collective enhancement": Path("assets/scenario_d.png"),
 }
-st.image(str(scenario_image_paths[scenario]), width=plot_width_px)
+st.image(str(scenario_image_paths[scenario]))
 
 fig = build_plot(
     t=t,
