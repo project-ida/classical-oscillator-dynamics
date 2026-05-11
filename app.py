@@ -192,7 +192,8 @@ def build_plot(
     ax_amp.axvline(duration * 1e6, linestyle="--", linewidth=1, color="gray")
     ax_amp.set_title(title, fontsize=title_fs)
     ax_amp.set_ylabel("Normalized mode amplitude", fontsize=label_fs)
-    ax_amp.set_ylim(-1.15, 1.15)
+    amplitude_ylim = (-1.15, 1.40)
+    ax_amp.set_ylim(amplitude_ylim)
     amplitude_ticks = np.linspace(-1.0, 1.0, 5)
     ax_amp.set_yticks(amplitude_ticks)
     ax_amp.tick_params(axis="both", labelsize=tick_fs)
@@ -217,17 +218,17 @@ def build_plot(
     ax_drive.tick_params(axis='y', colors=COLORS["drive"], labelsize=tick_fs)
     ax_drive.set_yticks(amplitude_ticks)
     ax_drive.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
-    ax_drive.set_ylim(-1.05, 1.05)
+    ax_drive.set_ylim(amplitude_ylim)
 
     # Merge legends
     lines1, labels1 = ax_amp.get_legend_handles_labels()
     lines2, labels2 = ax_drive.get_legend_handles_labels()
     ax_amp.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=legend_fs)
 
-    ax_amp.text(duration * 1e6 / 2, 1.03, "drive on", ha="center", fontsize=annotation_fs)
+    ax_amp.text(duration * 1e6 / 2, 1.06, "drive on", ha="center", fontsize=annotation_fs)
     ax_amp.text(
         duration * 1e6 + 0.12 * (t[-1] - t[0]) * 1e6,
-        1.03,
+        1.06,
         "free evolution",
         ha="center",
         fontsize=annotation_fs,
@@ -266,20 +267,21 @@ def build_plot(
     ax_energy.axvline(0, linestyle="--", linewidth=1, color="gray")
     ax_energy.axvline(duration * 1e6, linestyle="--", linewidth=1, color="gray")
     ax_energy.set_xlabel("Time (µs)", fontsize=label_fs)
-    ax_energy.set_ylabel("Energy / final delivered drive energy", fontsize=label_fs)
+    ax_energy.set_ylabel("Normalized energy", fontsize=label_fs)
     ax_energy.set_xlim(t[0] * 1e6, x_axis_max_us)
-    ax_energy.set_ylim(-0.03, 1.08)
+    ax_energy.set_ylim(-0.03, 1.22)
     ax_energy.tick_params(axis="both", labelsize=tick_fs)
     ax_energy.legend(loc="upper right", fontsize=legend_fs)
-    ax_energy.text(duration * 1e6 / 2, 1.02, "drive on", ha="center", fontsize=annotation_fs)
+    ax_energy.text(duration * 1e6 / 2, 1.10, "drive on", ha="center", fontsize=annotation_fs)
     ax_energy.text(
         duration * 1e6 + 0.12 * (t[-1] - t[0]) * 1e6,
-        1.02,
+        1.10,
         "drive off",
         ha="center",
         fontsize=annotation_fs,
     )
 
+    fig.align_ylabels([ax_amp, ax_energy])
     plt.tight_layout()
     return fig
 
