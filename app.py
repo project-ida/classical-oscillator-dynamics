@@ -672,14 +672,16 @@ elif scenario == "3. Donor → acceptor via off-resonant bus (single or collecti
     drive_signal_for_plot = np.sqrt(N_D) * drive_strength * drive_carrier_unit
 
     if abs(Delta_B) > 1e-12:
-        J_single_hz = (g_D * g_A / Delta_B) / (2 * np.pi)
-        J_bright_hz = (np.sqrt(N_D * N_A) * g_D * g_A / Delta_B) / (2 * np.pi)
-        coupling_text = (
-            f"J_single/2π ≈ {J_single_hz:.0f} Hz, "
-            f"J_bright/2π ≈ {J_bright_hz:.0f} Hz"
-        )
+        J_eff_hz = (g_DB_bright * g_BA_bright / Delta_B) / (2 * np.pi)
+        j_text = f"J/2π ≈ {J_eff_hz:.0f} Hz"
     else:
-        coupling_text = "Effective-coupling estimate undefined at zero detuning"
+        j_text = "J estimate undefined at zero detuning"
+
+    coupling_text = (
+        f"g_DB/2π = {g_DB_bright / (2 * np.pi * 1e3):.1f} kHz, "
+        f"g_BA/2π = {g_BA_bright / (2 * np.pi * 1e3):.1f} kHz, "
+        f"{j_text}"
+    )
 
     title = (
         f"Off-resonant bus-mediated donor-acceptor transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
@@ -783,10 +785,12 @@ else:
 
     drive_signal_for_plot = drive_strength * drive_carrier_unit
 
+    J_res_khz = 0.5 * np.sqrt(g_DB_khz ** 2 + g_BA_khz ** 2)
+
     title = (
         f"Resonant/near-resonant bus transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
-        f"f_B = {fB_khz:.0f} kHz, Δ_DB/2π = {Delta_DB_hz:.0f} Hz, "
-        f"Δ_AB/2π = {Delta_AB_hz:.0f} Hz"
+        f"f_B = {fB_khz:.0f} kHz, g_DB/2π = {g_DB_khz:.1f} kHz, "
+        f"g_BA/2π = {g_BA_khz:.1f} kHz, J/2π = {J_res_khz:.1f} kHz"
     )
 
 st.sidebar.header("Plot settings")
