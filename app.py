@@ -270,6 +270,7 @@ def build_plot(
     ax_energy.set_ylabel("Normalized energy", fontsize=label_fs)
     ax_energy.set_xlim(t[0] * 1e6, x_axis_max_us)
     ax_energy.set_ylim(-0.03, 1.22)
+    ax_energy.set_yticks(np.linspace(0.0, 1.0, 6))
     ax_energy.tick_params(axis="both", labelsize=tick_fs)
     ax_energy.legend(loc="upper right", fontsize=legend_fs)
     ax_energy.text(duration * 1e6 / 2, 1.10, "drive on", ha="center", fontsize=annotation_fs)
