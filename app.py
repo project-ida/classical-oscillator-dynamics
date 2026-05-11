@@ -225,10 +225,10 @@ def build_plot(
     lines2, labels2 = ax_drive.get_legend_handles_labels()
     ax_amp.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=legend_fs)
 
-    ax_amp.text(duration * 1e6 / 2, 1.06, "drive on", ha="center", fontsize=annotation_fs)
+    ax_amp.text(duration * 1e6 / 2, 1.15, "drive on", ha="center", fontsize=annotation_fs)
     ax_amp.text(
         duration * 1e6 + 0.12 * (t[-1] - t[0]) * 1e6,
-        1.06,
+        1.15,
         "free evolution",
         ha="center",
         fontsize=annotation_fs,
