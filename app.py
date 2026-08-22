@@ -5,6 +5,13 @@ import matplotlib.ticker as mticker
 import streamlit as st
 from io import BytesIO
 from pathlib import Path
+from oscillator_model import (
+    burst_duration,
+    coupled_eigenfrequencies_khz,
+    khz_to_omega,
+    legacy_drive_frequency,
+    steady_state_sweep,
+)
 
 st.set_page_config(page_title="LC Transfer Analog Simulator", layout="wide")
 
@@ -25,9 +32,6 @@ COLORS = {
 # -----------------------------
 # Helper functions
 # -----------------------------
-def khz_to_omega(f_khz: float) -> float:
-    return 2 * np.pi * f_khz * 1e3
-
 def hz_to_omega(f_hz: float) -> float:
     return 2 * np.pi * f_hz
 
@@ -119,6 +123,7 @@ def build_plot(
     plot_width_px,
     plot_height_px,
     font_scale,
+    energy_norm_mode,
 ):
     """
     amplitude_meta: list of dicts with keys:
@@ -149,7 +154,7 @@ def build_plot(
     # Energies
     E_modes, W_drive, E_loss = energy_accounting(t, a, kappas, drive_vector, drive_envelope)
 
-    norm = np.max(W_drive)
+    norm = np.max(E_modes[:, 0]) if energy_norm_mode == "Peak donor stored energy" else np.max(W_drive)
     if norm <= 0:
         norm = max(np.max(E_modes), 1.0)
 
@@ -238,13 +243,11 @@ def build_plot(
     # -----------------------------
     # Energy subplot
     # -----------------------------
-    ax_energy.plot(
-        t * 1e6,
-        W_drive_n,
-        linewidth=2.0,
-        label="Cumulative energy delivered by drive",
-        color=COLORS["drive"],
-    )
+    if energy_norm_mode == "Delivered drive energy":
+        ax_energy.plot(
+            t * 1e6, W_drive_n, linewidth=2.0,
+            label="Cumulative energy delivered by drive", color=COLORS["drive"],
+        )
 
     for item in energy_meta:
         curve = E_modes[:, item["indices"]].sum(axis=1) / norm
@@ -256,19 +259,21 @@ def build_plot(
             color=COLORS[item["color_key"]],
         )
 
-    ax_energy.plot(
-        t * 1e6,
-        E_undissipated_n,
-        linewidth=2.0,
-        linestyle="--",
-        label="Total undissipated delivered energy",
-        color=COLORS["undissipated"],
-    )
+    if energy_norm_mode == "Delivered drive energy":
+        ax_energy.plot(
+            t * 1e6, E_undissipated_n, linewidth=2.0, linestyle="--",
+            label="Total undissipated delivered energy", color=COLORS["undissipated"],
+        )
 
     ax_energy.axvline(0, linestyle="--", linewidth=1, color="gray")
     ax_energy.axvline(duration * 1e6, linestyle="--", linewidth=1, color="gray")
     ax_energy.set_xlabel("Time (µs)", fontsize=label_fs)
-    ax_energy.set_ylabel("Normalized energy", fontsize=label_fs)
+    energy_ylabel = (
+        "Energy / peak donor stored energy"
+        if energy_norm_mode == "Peak donor stored energy"
+        else "Energy / peak delivered drive energy"
+    )
+    ax_energy.set_ylabel(energy_ylabel, fontsize=label_fs)
     ax_energy.set_xlim(t[0] * 1e6, x_axis_max_us)
     ax_energy.set_ylim(-0.03, 1.22)
     ax_energy.set_yticks(np.linspace(0.0, 1.0, 6))
@@ -386,24 +391,55 @@ scenario = st.sidebar.selectbox(
     key="scenario",
 )
 
+if scenario == "c) Indirect coupling via off-resonant bus":
+    def load_aug21_preset():
+        preset = {
+            "fD_khz": 138.61, "fA_khz": 138.61, "fB_khz": 103.5,
+            "g_D_khz": 12.3, "g_A_khz": 12.3, "f_drive_khz": 142.1,
+            "N_cycles": 3, "Q_D": 80, "Q_A": 80, "Q_B": 70,
+            "energy_norm_mode": "Peak donor stored energy",
+        }
+        for key, value in preset.items():
+            st.query_params[key] = format_query_value(value)
+            st.session_state.pop(key, None)
+
+    st.sidebar.button(
+        "Load Aug 21 experimental fit", on_click=load_aug21_preset,
+        help=("Loads a simple three-mode spectral-fit starting point. The bare-frequency "
+              "inputs are fitted model parameters, not isolated-resonator measurements."),
+        width="stretch",
+    )
+    st.sidebar.caption(
+        "Simple three-mode spectral-fit starting point; bare inputs are not independently "
+        "measured isolated resonances."
+    )
+
 settings_to_sync = {"scenario": scenario}
 
 st.sidebar.header("Shared parameters")
 fD_khz = st.sidebar.slider(
-    "Donor frequency f_D (kHz)",
+    "Bare donor frequency f_D (kHz)",
     20.0,
     300.0,
     query_float("fD_khz", 100.0, 20.0, 300.0),
-    1.0,
+    0.1,
     key="fD_khz",
 )
 fA_khz = st.sidebar.slider(
-    "Acceptor frequency f_A (kHz)",
+    "Bare acceptor frequency f_A (kHz)",
     20.0,
     300.0,
     query_float("fA_khz", 100.0, 20.0, 300.0),
-    1.0,
+    0.1,
     key="fA_khz",
+)
+f_drive_default = legacy_drive_frequency(
+    _query_value("f_drive_khz"), fD_khz
+)
+f_drive_default = _clamp(f_drive_default, 20.0, 300.0)
+f_drive_khz = st.sidebar.slider(
+    "Drive carrier frequency f_drive (kHz)", 20.0, 300.0,
+    f_drive_default, 0.1, key="f_drive_khz",
 )
 N_cycles = st.sidebar.slider(
     "Drive burst length (cycles)",
@@ -461,11 +497,19 @@ dt_us = st.sidebar.select_slider(
     value=query_float_option("dt_us", dt_options, 0.05),
     key="dt_us",
 )
+energy_norm_options = ["Delivered drive energy", "Peak donor stored energy"]
+energy_norm_mode = st.sidebar.selectbox(
+    "Energy normalization", energy_norm_options,
+    index=energy_norm_options.index(query_choice(
+        "energy_norm_mode", energy_norm_options, energy_norm_options[0]
+    )), key="energy_norm_mode",
+)
 
 settings_to_sync.update(
     {
         "fD_khz": fD_khz,
         "fA_khz": fA_khz,
+        "f_drive_khz": f_drive_khz,
         "N_cycles": N_cycles,
         "Q_D": Q_D,
         "Q_A": Q_A,
@@ -473,14 +517,16 @@ settings_to_sync.update(
         "t_pre_us": t_pre_us,
         "t_post_us": t_post_us,
         "dt_us": dt_us,
+        "energy_norm_mode": energy_norm_mode,
     }
 )
 
 omegaD = khz_to_omega(fD_khz)
 omegaA = khz_to_omega(fA_khz)
-omega_ref = omegaD
+omega_drive = khz_to_omega(f_drive_khz)
+omega_ref = omega_drive
 
-duration = N_cycles / (fD_khz * 1e3)
+duration = burst_duration(N_cycles, f_drive_khz)
 t = np.arange(-t_pre_us * 1e-6, duration + t_post_us * 1e-6, dt_us * 1e-6)
 drive_envelope, drive_carrier_unit = make_drive(t, omega_ref, duration)
 
@@ -516,7 +562,7 @@ if scenario == "Donor preparation":
 
     drive_signal_for_plot = drive_strength * drive_carrier_unit
 
-    title = f"Donor preparation after {N_cycles}-cycle {fD_khz:.0f} kHz burst"
+    title = f"Donor preparation after {N_cycles}-cycle {f_drive_khz:.1f} kHz burst"
 
 elif scenario == "a) Direct coupling":
     # Direct coupling in kHz. For backward compatibility, old URLs using
@@ -566,7 +612,7 @@ elif scenario == "a) Direct coupling":
     drive_signal_for_plot = drive_strength * drive_carrier_unit
 
     title = (
-        f"Direct donor-acceptor transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
+        f"Direct donor-acceptor transfer after {N_cycles}-cycle {f_drive_khz:.1f} kHz burst\n"
         f"J_a/2π = {J_khz:.1f} kHz"
     )
 
@@ -599,11 +645,11 @@ elif scenario in (
         ]
 
     fB_khz = st.sidebar.slider(
-        "Bus frequency f_B (kHz)",
+        "Bare bus frequency f_B (kHz)",
         5.0,
         300.0,
         query_float("fB_khz", 50.0, 5.0, 300.0),
-        1.0,
+        0.1,
         key="fB_khz",
     )
     Q_B = st.sidebar.slider(
@@ -707,10 +753,13 @@ elif scenario in (
 
     drive_signal_for_plot = np.sqrt(N_D) * drive_strength * drive_carrier_unit
 
+    detuning_ratio = np.inf
     if abs(Delta_B) > 1e-12:
         J_eff_hz = (g_DB_bright * g_BA_bright / Delta_B) / (2 * np.pi)
-        j_text = f"J/2π ≈ {J_eff_hz:.0f} Hz"
+        detuning_ratio = max(abs(g_DB_bright), abs(g_BA_bright)) / abs(Delta_B)
+        j_text = f"Large-detuning estimate: J_eff/2π ≈ {J_eff_hz / 1e3:.3f} kHz"
     else:
+        J_eff_hz = np.nan
         j_text = "J estimate undefined at zero detuning"
 
     coupling_text = (
@@ -720,12 +769,15 @@ elif scenario in (
     )
 
     title = (
-        f"Off-resonant bus-mediated transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
+        f"Off-resonant bus-mediated transfer after {N_cycles}-cycle {f_drive_khz:.1f} kHz burst\n"
         f"N_D = {N_D}, N_A = {N_A}, f_B = {fB_khz:.0f} kHz, {coupling_text}"
     )
 
-    if abs(Delta_B / (2 * np.pi)) < 5e3:
-        scenario_warning = "The bus is close to resonance. The large-detuning estimate for J is not reliable here."
+    if detuning_ratio > 0.1:
+        scenario_warning = (
+            f"g/|Δ_B| = {detuning_ratio:.3f}. The perturbative g²/Δ estimate may not be "
+            "quantitatively reliable; use the exact three-mode eigenfrequencies."
+        )
 
 
 elif scenario == "b) Indirect coupling via resonant bus":
@@ -741,11 +793,11 @@ elif scenario == "b) Indirect coupling via resonant bus":
     ]
 
     fB_khz = st.sidebar.slider(
-        "Bus frequency f_B (kHz)",
+        "Bare bus frequency f_B (kHz)",
         20.0,
         300.0,
         query_float("fB_res_khz", fD_khz, 20.0, 300.0),
-        1.0,
+        0.1,
         key="fB_res_khz",
     )
     Q_B = st.sidebar.slider(
@@ -815,10 +867,35 @@ elif scenario == "b) Indirect coupling via resonant bus":
     J_res_khz = 0.5 * np.sqrt(g_DB_khz ** 2 + g_BA_khz ** 2)
 
     title = (
-        f"Resonant/near-resonant bus transfer after {N_cycles}-cycle {fD_khz:.0f} kHz burst\n"
+        f"Resonant/near-resonant bus transfer after {N_cycles}-cycle {f_drive_khz:.1f} kHz burst\n"
         f"f_B = {fB_khz:.0f} kHz, g_DB/2π = {g_DB_khz:.1f} kHz, "
         f"g_BA/2π = {g_BA_khz:.1f} kHz, J/2π = {J_res_khz:.1f} kHz"
     )
+
+# Exact spectrum for every coupled model, using the same matrix as the dynamics.
+eig_freqs_khz = coupled_eigenfrequencies_khz(omegas, G)
+
+if len(omegas) > 1:
+    st.sidebar.header("Frequency sweep")
+    auto_margin = max(5.0, 0.12 * (eig_freqs_khz[-1] - eig_freqs_khz[0]))
+    sweep_start_khz = st.sidebar.number_input(
+        "Sweep start frequency (kHz)", 1.0, 500.0,
+        query_float("sweep_start_khz", max(1.0, eig_freqs_khz[0] - auto_margin), 1.0, 500.0),
+        0.1, key="sweep_start_khz",
+    )
+    sweep_stop_khz = st.sidebar.number_input(
+        "Sweep stop frequency (kHz)", 1.0, 500.0,
+        query_float("sweep_stop_khz", min(500.0, eig_freqs_khz[-1] + auto_margin), 1.0, 500.0),
+        0.1, key="sweep_stop_khz",
+    )
+    sweep_points = st.sidebar.slider(
+        "Number of sweep points", 100, 4000,
+        query_int("sweep_points", 1000, 100, 4000), 100, key="sweep_points",
+    )
+    settings_to_sync.update({
+        "sweep_start_khz": sweep_start_khz, "sweep_stop_khz": sweep_stop_khz,
+        "sweep_points": sweep_points,
+    })
 
 st.sidebar.header("Plot settings")
 total_time_max_us = float(t[-1] * 1e6)
@@ -889,6 +966,77 @@ scenario_image_paths = {
 }
 st.image(str(scenario_image_paths[scenario]))
 
+st.caption(
+    f"Dynamic parameters: f_drive = {f_drive_khz:.1f} kHz; "
+    f"bare f_D = {fD_khz:.2f} kHz; bare f_A = {fA_khz:.2f} kHz"
+    + (f"; bare f_B = {fB_khz:.2f} kHz" if len(omegas) == 3 else "")
+)
+
+if len(omegas) > 1:
+    modes_text = " | ".join(f"{frequency:.3f} kHz" for frequency in eig_freqs_khz)
+    st.subheader("Coupled normal modes")
+    st.info(modes_text)
+
+    if sweep_stop_khz <= sweep_start_khz:
+        st.warning("Sweep stop must be above sweep start; the plot uses a 0.1 kHz span.")
+        sweep_stop_for_plot = sweep_start_khz + 0.1
+    else:
+        sweep_stop_for_plot = sweep_stop_khz
+    sweep_frequencies = np.linspace(sweep_start_khz, sweep_stop_for_plot, sweep_points)
+    sweep_response = steady_state_sweep(
+        sweep_frequencies, omegas, kappas, G, drive_vector
+    )
+    sweep_magnitudes = np.abs(sweep_response)
+    sweep_norm = max(float(np.max(sweep_magnitudes)), 1e-30)
+    sweep_magnitudes /= sweep_norm
+
+    sweep_fig, sweep_ax = plt.subplots(figsize=(plot_width_px / 100, 3.8), dpi=100)
+    sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, 0],
+                  label="|a_D|", color=COLORS["donor"], linewidth=2)
+    if len(omegas) == 3:
+        sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, 1],
+                      label="|a_B|", color=COLORS["bus"], linewidth=1.5)
+        acceptor_index = 2
+    else:
+        acceptor_index = 1
+    sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, acceptor_index],
+                  label="|a_A|", color=COLORS["acceptor"], linewidth=2)
+    for mode_frequency in eig_freqs_khz:
+        sweep_ax.axvline(mode_frequency, color="gray", linestyle=":", linewidth=0.9)
+    sweep_ax.set(title="Normalized steady-state frequency response",
+                 xlabel="Drive frequency (kHz)", ylabel="Relative amplitude")
+    sweep_ax.grid(alpha=0.2)
+    sweep_ax.legend()
+    sweep_fig.tight_layout()
+    st.pyplot(sweep_fig, width="content")
+    plt.close(sweep_fig)
+
+if scenario == "c) Indirect coupling via off-resonant bus":
+    endpoint_splitting_khz = eig_freqs_khz[-1] - eig_freqs_khz[-2]
+    beat_period_us = 1000.0 / endpoint_splitting_khz
+    half_swap_us = 500.0 / endpoint_splitting_khz
+    st.subheader("Off-resonant-bus diagnostics")
+    st.markdown(
+        f"""
+| Quantity | Value |
+|---|---:|
+| Bare frequencies (D / B / A) | {fD_khz:.3f} / {fB_khz:.3f} / {fA_khz:.3f} kHz |
+| Drive carrier; burst | {f_drive_khz:.3f} kHz; {N_cycles} cycles; {duration * 1e6:.3f} µs |
+| Couplings g_DB/2π; g_BA/2π | {g_DB_bright / (2*np.pi*1e3):.3f}; {g_BA_bright / (2*np.pi*1e3):.3f} kHz |
+| Coupled eigenfrequencies | {modes_text} |
+| Endpoint-like splitting f₃ − f₂ | {endpoint_splitting_khz:.3f} kHz |
+| Spectral beat period 1/Δf | {beat_period_us:.3f} µs |
+| Spectral half-swap timescale 1/(2Δf) | {half_swap_us:.3f} µs |
+| Large-detuning J_eff/2π estimate | {J_eff_hz / 1e3:.3f} kHz |
+| Perturbative diagnostic g / abs(Δ_B) | {detuning_ratio:.3f} |
+"""
+    )
+    st.caption(
+        "The half-swap value is a spectral timescale, not a prediction that must equal the "
+        "exact donor-minimum time in this lossy three-mode simulation. Experimental pickup-bus "
+        "amplitude should be compared by timing and shape, not absolute scale."
+    )
+
 fig = build_plot(
     t=t,
     a=a,
@@ -905,6 +1053,7 @@ fig = build_plot(
     plot_width_px=plot_width_px,
     plot_height_px=plot_height_px,
     font_scale=font_scale,
+    energy_norm_mode=energy_norm_mode,
 )
 
 # Render to an image and display with an explicit pixel width.
