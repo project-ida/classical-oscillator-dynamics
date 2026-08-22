@@ -2,6 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import pandas as pd
 import streamlit as st
 from io import BytesIO
 from pathlib import Path
@@ -11,6 +12,11 @@ from oscillator_model import (
     khz_to_omega,
     legacy_drive_frequency,
     steady_state_sweep,
+    exact_rlc_eigenfrequencies_khz,
+    exact_rlc_matrices,
+    exact_rlc_sweep,
+    experimental_energy_proxy,
+    rk4_exact_rlc,
 )
 
 st.set_page_config(page_title="LC Transfer Analog Simulator", layout="wide")
@@ -35,14 +41,17 @@ COLORS = {
 def hz_to_omega(f_hz: float) -> float:
     return 2 * np.pi * f_hz
 
-def make_drive(t, omega_ref, duration):
-    """Smooth sin^2-envelope burst."""
+def make_drive(t, omega_ref, duration, envelope_shape="sin2"):
+    """Return a selectable finite-burst envelope and physical sine carrier."""
     envelope = np.zeros_like(t)
     inside = (t >= 0) & (t <= duration)
     if np.any(inside):
-        tau = t[inside] / duration
-        envelope[inside] = np.sin(np.pi * tau) ** 2
-    carrier = np.cos(omega_ref * t)
+        if envelope_shape == "rectangular":
+            envelope[inside] = 1.0
+        else:
+            tau = t[inside] / duration
+            envelope[inside] = np.sin(np.pi * tau) ** 2
+    carrier = np.sin(omega_ref * t)
     return envelope, envelope * carrier
 
 def rk4_coupled_modes(t, omegas, kappas, G, drive_vector, drive_envelope, omega_ref):
@@ -124,6 +133,7 @@ def build_plot(
     plot_height_px,
     font_scale,
     energy_norm_mode,
+    observable_mode,
 ):
     """
     amplitude_meta: list of dicts with keys:
@@ -153,8 +163,17 @@ def build_plot(
 
     # Energies
     E_modes, W_drive, E_loss = energy_accounting(t, a, kappas, drive_vector, drive_envelope)
+    proxy_mode = observable_mode == "Experimental envelope-energy proxy"
+    displayed_energy = (
+        experimental_energy_proxy(t, displayed_signals, np.ones(displayed_signals.shape[1]))
+        if proxy_mode else E_modes
+    )
 
-    norm = np.max(E_modes[:, 0]) if energy_norm_mode == "Peak donor stored energy" else np.max(W_drive)
+    if proxy_mode:
+        norm = (np.max(displayed_energy[:, 0]) if energy_norm_mode == "Peak donor stored energy"
+                else np.max(displayed_energy))
+    else:
+        norm = np.max(E_modes[:, 0]) if energy_norm_mode == "Peak donor stored energy" else np.max(W_drive)
     if norm <= 0:
         norm = max(np.max(E_modes), 1.0)
 
@@ -243,23 +262,29 @@ def build_plot(
     # -----------------------------
     # Energy subplot
     # -----------------------------
-    if energy_norm_mode == "Delivered drive energy":
+    if energy_norm_mode == "Delivered drive energy" and not proxy_mode:
         ax_energy.plot(
             t * 1e6, W_drive_n, linewidth=2.0,
             label="Cumulative energy delivered by drive", color=COLORS["drive"],
         )
 
     for item in energy_meta:
-        curve = E_modes[:, item["indices"]].sum(axis=1) / norm
+        if proxy_mode:
+            curve_index = energy_meta.index(item)
+            curve = displayed_energy[:, curve_index] / norm
+            curve_label = f"Experimental-analysis energy proxy: {item['label'].replace('Stored ', '')}"
+        else:
+            curve = displayed_energy[:, item["indices"]].sum(axis=1) / norm
+            curve_label = item["label"]
         ax_energy.plot(
             t * 1e6,
             curve,
             linewidth=2.0,
-            label=item["label"],
+            label=curve_label,
             color=COLORS[item["color_key"]],
         )
 
-    if energy_norm_mode == "Delivered drive energy":
+    if energy_norm_mode == "Delivered drive energy" and not proxy_mode:
         ax_energy.plot(
             t * 1e6, E_undissipated_n, linewidth=2.0, linestyle="--",
             label="Total undissipated delivered energy", color=COLORS["undissipated"],
@@ -268,7 +293,7 @@ def build_plot(
     ax_energy.axvline(0, linestyle="--", linewidth=1, color="gray")
     ax_energy.axvline(duration * 1e6, linestyle="--", linewidth=1, color="gray")
     ax_energy.set_xlabel("Time (µs)", fontsize=label_fs)
-    energy_ylabel = (
+    energy_ylabel = ("Experimental-analysis energy proxy / donor peak" if proxy_mode else
         "Energy / peak donor stored energy"
         if energy_norm_mode == "Peak donor stored energy"
         else "Energy / peak delivered drive energy"
@@ -290,6 +315,61 @@ def build_plot(
 
     fig.align_ylabels([ax_amp, ax_energy])
     plt.tight_layout()
+    return fig
+
+def build_exact_rlc_plot(t, q, currents, C_matrix, L_matrix, drive_waveform, drive_strength,
+                         duration, title, x_axis_max_us, energy_norm_mode,
+                         observable_mode, plot_width_px, plot_height_px):
+    capacitances = np.diag(C_matrix)
+    voltages = q / capacitances[None, :]
+    amplitude_scale = max(float(np.max(np.abs(voltages))), 1e-30)
+    fig, (ax_v, ax_e) = plt.subplots(
+        2, 1, sharex=True, figsize=(plot_width_px / 100, plot_height_px / 100), dpi=100
+    )
+    labels, keys = ["Donor", "Bus", "Acceptor"], ["donor", "bus", "acceptor"]
+    for index, (label, key) in enumerate(zip(labels, keys)):
+        ax_v.plot(t * 1e6, voltages[:, index] / amplitude_scale,
+                  label=f"{label} capacitor voltage", color=COLORS[key], linewidth=1.5)
+    ax_v.plot(t * 1e6, drive_waveform, "--", color=COLORS["drive"], label="Drive waveform")
+    ax_v.set(title=title, ylabel="Normalized voltage")
+    ax_v.legend(loc="upper right")
+
+    if observable_mode == "Experimental envelope-energy proxy":
+        curves = experimental_energy_proxy(t, voltages, capacitances)
+        curve_prefix = "Experimental-analysis energy proxy"
+        donor_norm = max(float(np.max(curves[:, 0])), 1e-30)
+        norm = donor_norm if energy_norm_mode == "Peak donor stored energy" else max(float(np.max(curves)), 1e-30)
+        for index, (label, key) in enumerate(zip(labels, keys)):
+            ax_e.plot(t * 1e6, curves[:, index] / norm,
+                      label=f"{curve_prefix}: {label}", color=COLORS[key], linewidth=2)
+        ax_e.set_ylabel("Envelope-energy proxy / donor peak" if energy_norm_mode == "Peak donor stored energy"
+                        else "Normalized envelope-energy proxy")
+    else:
+        self_energy = 0.5 * q**2 / capacitances[None, :] + 0.5 * currents**2 * np.diag(L_matrix)[None, :]
+        electric = 0.5 * np.einsum("ti,ij,tj->t", q, np.diag(1/capacitances), q)
+        magnetic = 0.5 * np.einsum("ti,ij,tj->t", currents, L_matrix, currents)
+        mutual = magnetic - 0.5 * np.sum(currents**2 * np.diag(L_matrix)[None, :], axis=1)
+        total = electric + magnetic
+        drive_power = drive_strength * drive_waveform * currents[:, 0]
+        drive_work = np.zeros(len(t))
+        drive_work[1:] = np.cumsum(0.5 * (drive_power[1:] + drive_power[:-1]) * np.diff(t))
+        norm = max(float(np.max(self_energy[:, 0] if energy_norm_mode == "Peak donor stored energy" else drive_work)), 1e-30)
+        for index, (label, key) in enumerate(zip(labels, keys)):
+            ax_e.plot(t * 1e6, self_energy[:, index] / norm,
+                      label=f"{label} local self-energy", color=COLORS[key], linewidth=1.7)
+        ax_e.plot(t * 1e6, mutual / norm, label="Mutual coupling energy", color="purple", linestyle="--")
+        ax_e.plot(t * 1e6, total / norm, label="Total physical energy", color=COLORS["undissipated"], linewidth=2)
+        if energy_norm_mode == "Delivered drive energy":
+            ax_e.plot(t * 1e6, drive_work / norm, label="Cumulative delivered drive energy",
+                      color=COLORS["drive"], linewidth=1.5)
+        ax_e.set_ylabel("Energy / donor peak" if energy_norm_mode == "Peak donor stored energy" else "Energy / peak delivered drive energy")
+    for axis in (ax_v, ax_e):
+        axis.axvline(0, color="gray", linestyle="--", linewidth=0.8)
+        axis.axvline(duration * 1e6, color="gray", linestyle="--", linewidth=0.8)
+        axis.grid(alpha=0.15)
+    ax_e.set(xlabel="Time (µs)", xlim=(t[0] * 1e6, x_axis_max_us))
+    ax_e.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
     return fig
 
 
@@ -391,20 +471,43 @@ scenario = st.sidebar.selectbox(
     key="scenario",
 )
 
+model_options = ["Coupled-mode approximation", "Exact mutually coupled RLC circuit"]
+model = st.sidebar.selectbox(
+    "Model", model_options,
+    index=model_options.index(query_choice("model", model_options, model_options[0])),
+    key="model",
+)
+exact_model = model == model_options[1]
+st.sidebar.caption(
+    "Coupled-mode: conceptual J_eff and bright/dark-mode intuition. "
+    "Exact mutual RLC: quantitative coil/capacitor comparison."
+)
+if exact_model and scenario != "c) Indirect coupling via off-resonant bus":
+    st.sidebar.warning("The exact D–B–A backend is currently available in scenario c; using coupled-mode here.")
+    exact_model = False
+
 if scenario == "c) Indirect coupling via off-resonant bus":
     def load_aug21_preset():
-        preset = {
+        preset = ({
+            "fD_khz": 138.58, "fA_khz": 138.58, "fB_khz": 98.62,
+            "C_D_nf": 100.0, "C_B_nf": 100.0, "C_A_nf": 103.2,
+            "k_DB": 0.160, "k_BA": 0.160, "f_drive_khz": 142.13,
+            "N_cycles": 3, "Q_D": 100, "Q_A": 100, "Q_B": 70,
+            "drive_envelope": "rectangular", "observable_mode": "Experimental envelope-energy proxy",
+            "energy_norm_mode": "Peak donor stored energy",
+        } if exact_model else {
             "fD_khz": 138.61, "fA_khz": 138.61, "fB_khz": 103.5,
             "g_D_khz": 12.3, "g_A_khz": 12.3, "f_drive_khz": 142.1,
             "N_cycles": 3, "Q_D": 80, "Q_A": 80, "Q_B": 70,
             "energy_norm_mode": "Peak donor stored energy",
-        }
+        })
         for key, value in preset.items():
             st.query_params[key] = format_query_value(value)
             st.session_state.pop(key, None)
 
     st.sidebar.button(
-        "Load Aug 21 experimental fit", on_click=load_aug21_preset,
+        ("Load Aug 21 exact mutual-L fit" if exact_model else "Load Aug 21 experimental fit"),
+        on_click=load_aug21_preset,
         help=("Loads a simple three-mode spectral-fit starting point. The bare-frequency "
               "inputs are fitted model parameters, not isolated-resonator measurements."),
         width="stretch",
@@ -414,7 +517,7 @@ if scenario == "c) Indirect coupling via off-resonant bus":
         "measured isolated resonances."
     )
 
-settings_to_sync = {"scenario": scenario}
+settings_to_sync = {"scenario": scenario, "model": model}
 
 st.sidebar.header("Shared parameters")
 fD_khz = st.sidebar.slider(
@@ -440,6 +543,17 @@ f_drive_default = _clamp(f_drive_default, 20.0, 300.0)
 f_drive_khz = st.sidebar.slider(
     "Drive carrier frequency f_drive (kHz)", 20.0, 300.0,
     f_drive_default, 0.1, key="f_drive_khz",
+)
+drive_envelope_values = ["rectangular", "sin2"]
+drive_envelope_labels = {
+    "rectangular": "Rectangular sine burst",
+    "sin2": "sin² tapered burst",
+}
+drive_envelope = st.sidebar.selectbox(
+    "Drive burst envelope", drive_envelope_values,
+    index=drive_envelope_values.index(query_choice(
+        "drive_envelope", drive_envelope_values, "sin2"
+    )), format_func=lambda value: drive_envelope_labels[value], key="drive_envelope",
 )
 N_cycles = st.sidebar.slider(
     "Drive burst length (cycles)",
@@ -504,12 +618,20 @@ energy_norm_mode = st.sidebar.selectbox(
         "energy_norm_mode", energy_norm_options, energy_norm_options[0]
     )), key="energy_norm_mode",
 )
+observable_options = ["Physical model energy", "Experimental envelope-energy proxy"]
+observable_mode = st.sidebar.selectbox(
+    "Energy / observable display", observable_options,
+    index=observable_options.index(query_choice(
+        "observable_mode", observable_options, observable_options[0]
+    )), key="observable_mode",
+)
 
 settings_to_sync.update(
     {
         "fD_khz": fD_khz,
         "fA_khz": fA_khz,
         "f_drive_khz": f_drive_khz,
+        "drive_envelope": drive_envelope,
         "N_cycles": N_cycles,
         "Q_D": Q_D,
         "Q_A": Q_A,
@@ -518,6 +640,7 @@ settings_to_sync.update(
         "t_post_us": t_post_us,
         "dt_us": dt_us,
         "energy_norm_mode": energy_norm_mode,
+        "observable_mode": observable_mode,
     }
 )
 
@@ -528,7 +651,11 @@ omega_ref = omega_drive
 
 duration = burst_duration(N_cycles, f_drive_khz)
 t = np.arange(-t_pre_us * 1e-6, duration + t_post_us * 1e-6, dt_us * 1e-6)
-drive_envelope, drive_carrier_unit = make_drive(t, omega_ref, duration)
+drive_envelope_values_t, drive_carrier_unit = make_drive(
+    t, omega_ref, duration, drive_envelope
+)
+drive_envelope_key = drive_envelope
+drive_envelope = drive_envelope_values_t
 
 kappa_D = omegaD / Q_D
 kappa_A = omegaA / Q_A
@@ -660,6 +787,27 @@ elif scenario in (
         10,
         key="Q_B",
     )
+    if exact_model:
+        st.sidebar.subheader("Exact circuit parameters")
+        C_D_nf = st.sidebar.number_input(
+            "Donor capacitance C_D (nF)", 1.0, 1000.0,
+            query_float("C_D_nf", 100.0, 1.0, 1000.0), 0.1, key="C_D_nf")
+        C_B_nf = st.sidebar.number_input(
+            "Bus capacitance C_B (nF)", 1.0, 1000.0,
+            query_float("C_B_nf", 100.0, 1.0, 1000.0), 0.1, key="C_B_nf")
+        C_A_nf = st.sidebar.number_input(
+            "Acceptor capacitance C_A (nF)", 1.0, 1000.0,
+            query_float("C_A_nf", 103.2, 1.0, 1000.0), 0.1, key="C_A_nf")
+        k_DB = st.sidebar.slider(
+            "Coupling coefficient k_DB", -0.45, 0.45,
+            query_float("k_DB", 0.160, -0.45, 0.45), 0.001, key="k_DB")
+        k_BA = st.sidebar.slider(
+            "Coupling coefficient k_BA", -0.45, 0.45,
+            query_float("k_BA", 0.160, -0.45, 0.45), 0.001, key="k_BA")
+        settings_to_sync.update({
+            "C_D_nf": C_D_nf, "C_B_nf": C_B_nf, "C_A_nf": C_A_nf,
+            "k_DB": k_DB, "k_BA": k_BA,
+        })
     if collective_mode:
         N_D = st.sidebar.slider(
             "Number of coherent donors N_D",
@@ -872,8 +1020,15 @@ elif scenario == "b) Indirect coupling via resonant bus":
         f"g_BA/2π = {g_BA_khz:.1f} kHz, J/2π = {J_res_khz:.1f} kHz"
     )
 
-# Exact spectrum for every coupled model, using the same matrix as the dynamics.
-eig_freqs_khz = coupled_eigenfrequencies_khz(omegas, G)
+# Spectrum for the selected model.
+if exact_model:
+    L_matrix, C_matrix, C_inv, R_matrix, K_matrix = exact_rlc_matrices(
+        [fD_khz, fB_khz, fA_khz], [C_D_nf, C_B_nf, C_A_nf],
+        [Q_D, Q_B, Q_A], k_DB, k_BA,
+    )
+    eig_freqs_khz = exact_rlc_eigenfrequencies_khz(L_matrix, C_inv)
+else:
+    eig_freqs_khz = coupled_eigenfrequencies_khz(omegas, G)
 
 if len(omegas) > 1:
     st.sidebar.header("Frequency sweep")
@@ -946,16 +1101,16 @@ settings_to_sync.update(
     }
 )
 
-# Run simulation
-a = rk4_coupled_modes(
-    t=t,
-    omegas=omegas,
-    kappas=kappas,
-    G=G,
-    drive_vector=drive_vector,
-    drive_envelope=drive_envelope,
-    omega_ref=omega_ref,
-)
+# Run the selected time-domain backend.
+if exact_model:
+    q_exact, i_exact = rk4_exact_rlc(
+        t, L_matrix, C_inv, R_matrix, drive_carrier_unit, drive_strength
+    )
+else:
+    a = rk4_coupled_modes(
+        t=t, omegas=omegas, kappas=kappas, G=G, drive_vector=drive_vector,
+        drive_envelope=drive_envelope, omega_ref=omega_ref,
+    )
 
 scenario_image_paths = {
     "Donor preparation": Path("assets/scenario_0.png"),
@@ -974,7 +1129,7 @@ st.caption(
 
 if len(omegas) > 1:
     modes_text = " | ".join(f"{frequency:.3f} kHz" for frequency in eig_freqs_khz)
-    st.subheader("Coupled normal modes")
+    st.subheader("Exact mutually coupled circuit eigenfrequencies" if exact_model else "Coupled normal modes")
     st.info(modes_text)
 
     if sweep_stop_khz <= sweep_start_khz:
@@ -983,24 +1138,30 @@ if len(omegas) > 1:
     else:
         sweep_stop_for_plot = sweep_stop_khz
     sweep_frequencies = np.linspace(sweep_start_khz, sweep_stop_for_plot, sweep_points)
-    sweep_response = steady_state_sweep(
-        sweep_frequencies, omegas, kappas, G, drive_vector
-    )
+    if exact_model:
+        sweep_response = exact_rlc_sweep(
+            sweep_frequencies, L_matrix, C_matrix, C_inv, R_matrix,
+            [drive_strength, 0.0, 0.0],
+        )
+    else:
+        sweep_response = steady_state_sweep(
+            sweep_frequencies, omegas, kappas, G, drive_vector
+        )
     sweep_magnitudes = np.abs(sweep_response)
     sweep_norm = max(float(np.max(sweep_magnitudes)), 1e-30)
     sweep_magnitudes /= sweep_norm
 
     sweep_fig, sweep_ax = plt.subplots(figsize=(plot_width_px / 100, 3.8), dpi=100)
     sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, 0],
-                  label="|a_D|", color=COLORS["donor"], linewidth=2)
+                  label="|V_D|" if exact_model else "|a_D|", color=COLORS["donor"], linewidth=2)
     if len(omegas) == 3:
         sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, 1],
-                      label="|a_B|", color=COLORS["bus"], linewidth=1.5)
+                      label="|V_B|" if exact_model else "|a_B|", color=COLORS["bus"], linewidth=1.5)
         acceptor_index = 2
     else:
         acceptor_index = 1
     sweep_ax.plot(sweep_frequencies, sweep_magnitudes[:, acceptor_index],
-                  label="|a_A|", color=COLORS["acceptor"], linewidth=2)
+                  label="|V_A|" if exact_model else "|a_A|", color=COLORS["acceptor"], linewidth=2)
     for mode_frequency in eig_freqs_khz:
         sweep_ax.axvline(mode_frequency, color="gray", linestyle=":", linewidth=0.9)
     sweep_ax.set(title="Normalized steady-state frequency response",
@@ -1011,7 +1172,52 @@ if len(omegas) > 1:
     st.pyplot(sweep_fig, width="content")
     plt.close(sweep_fig)
 
-if scenario == "c) Indirect coupling via off-resonant bus":
+if exact_model:
+    st.subheader("Exact circuit matrices")
+    matrix_labels = ["D", "B", "A"]
+    col_l, col_c = st.columns(2)
+    with col_l:
+        st.markdown("**L [µH]**")
+        st.dataframe(pd.DataFrame(L_matrix * 1e6, index=matrix_labels, columns=matrix_labels).style.format("{:.3f}"))
+        st.markdown("**R [Ω]**")
+        st.dataframe(pd.DataFrame(R_matrix, index=matrix_labels, columns=matrix_labels).style.format("{:.4f}"))
+    with col_c:
+        st.markdown("**C [nF]**")
+        st.dataframe(pd.DataFrame(C_matrix * 1e9, index=matrix_labels, columns=matrix_labels).style.format("{:.3f}"))
+        st.markdown("**K (dimensionless)**")
+        st.dataframe(pd.DataFrame(K_matrix, index=matrix_labels, columns=matrix_labels).style.format("{:.4f}"))
+    heat_fig, heat_ax = plt.subplots(figsize=(5.2, 4.2), dpi=100)
+    L_microhenry = L_matrix * 1e6
+    color_limit = max(float(np.max(np.abs(L_microhenry))), 1e-12)
+    image_handle = heat_ax.imshow(L_microhenry, cmap="coolwarm", vmin=-color_limit, vmax=color_limit)
+    heat_ax.set_xticks(range(3), matrix_labels)
+    heat_ax.set_yticks(range(3), matrix_labels)
+    heat_ax.set_title("Inductance matrix L [µH]")
+    for row in range(3):
+        for column in range(3):
+            heat_ax.text(column, row, f"{L_microhenry[row, column]:.2f}",
+                         ha="center", va="center", color="black")
+    heat_fig.colorbar(image_handle, ax=heat_ax, label="µH (zero-centered)")
+    heat_fig.tight_layout()
+    st.pyplot(heat_fig, width="content")
+    plt.close(heat_fig)
+    st.caption(
+        "Local self-energy curves exclude mutual coupling energy, so they are diagnostics rather "
+        "than a unique decomposition of total physical energy. Experimental bus amplitude should "
+        "be compared by timing and waveform shape, not by absolute amplitude, unless the pickup is calibrated."
+    )
+    pair_db = exact_rlc_eigenfrequencies_khz(
+        L_matrix[np.ix_([0, 1], [0, 1])], C_inv[np.ix_([0, 1], [0, 1])]
+    )
+    pair_ba = exact_rlc_eigenfrequencies_khz(
+        L_matrix[np.ix_([1, 2], [1, 2])], C_inv[np.ix_([1, 2], [1, 2])]
+    )
+    st.markdown(
+        f"**Derived pairwise lossless modes:** D–B = {pair_db[0]:.3f} / {pair_db[1]:.3f} kHz; "
+        f"B–A = {pair_ba[0]:.3f} / {pair_ba[1]:.3f} kHz."
+    )
+
+if scenario == "c) Indirect coupling via off-resonant bus" and not exact_model:
     endpoint_splitting_khz = eig_freqs_khz[-1] - eig_freqs_khz[-2]
     beat_period_us = 1000.0 / endpoint_splitting_khz
     half_swap_us = 500.0 / endpoint_splitting_khz
@@ -1037,24 +1243,22 @@ if scenario == "c) Indirect coupling via off-resonant bus":
         "amplitude should be compared by timing and shape, not absolute scale."
     )
 
-fig = build_plot(
-    t=t,
-    a=a,
-    amplitude_meta=amplitude_meta,
-    energy_meta=energy_meta,
-    kappas=kappas,
-    drive_vector=drive_vector,
-    drive_envelope=drive_envelope,
-    drive_signal_for_plot=drive_signal_for_plot,
-    omega_ref=omega_ref,
-    duration=duration,
-    title=title,
-    x_axis_max_us=x_axis_max_us,
-    plot_width_px=plot_width_px,
-    plot_height_px=plot_height_px,
-    font_scale=font_scale,
-    energy_norm_mode=energy_norm_mode,
-)
+if exact_model:
+    fig = build_exact_rlc_plot(
+        t, q_exact, i_exact, C_matrix, L_matrix, drive_carrier_unit, drive_strength, duration,
+        f"Exact mutual-RLC response after {N_cycles}-cycle {f_drive_khz:.2f} kHz burst",
+        x_axis_max_us, energy_norm_mode, observable_mode, plot_width_px, plot_height_px,
+    )
+else:
+    fig = build_plot(
+        t=t, a=a, amplitude_meta=amplitude_meta, energy_meta=energy_meta,
+        kappas=kappas, drive_vector=drive_vector, drive_envelope=drive_envelope,
+        drive_signal_for_plot=drive_signal_for_plot, omega_ref=omega_ref,
+        duration=duration, title=title, x_axis_max_us=x_axis_max_us,
+        plot_width_px=plot_width_px, plot_height_px=plot_height_px,
+        font_scale=font_scale, energy_norm_mode=energy_norm_mode,
+        observable_mode=observable_mode,
+    )
 
 # Render to an image and display with an explicit pixel width.
 # This avoids Streamlit stretching the plot to fill the full main-area width.
